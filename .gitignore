@@ -6,3 +6,5 @@ venv
 .chroma
 
 **/chroma_db
+
+.gradio
