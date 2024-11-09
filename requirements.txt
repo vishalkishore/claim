@@ -98,6 +98,7 @@ pydantic=2.9.2=pypi_0
 pydantic-core=2.23.4=pypi_0
 pydantic-settings=2.6.1=pypi_0
 pygments=2.18.0=pypi_0
+pymupdf=1.24.13=pypi_0
 pyparsing=3.2.0=pypi_0
 pypika=0.48.9=pypi_0
 pyproject-hooks=1.2.0=pypi_0
@@ -107,6 +108,7 @@ python-dateutil=2.9.0.post0=pypi_0
 python-dotenv=1.0.1=pypi_0
 pytz=2024.2=pypi_0
 pyyaml=6.0.2=pypi_0
+rank-bm25=0.2.2=pypi_0
 requests=2.32.3=pypi_0
 requests-oauthlib=2.0.0=pypi_0
 requests-toolbelt=1.0.0=pypi_0
