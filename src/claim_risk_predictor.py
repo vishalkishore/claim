@@ -1,4 +1,3 @@
-# src/claim_risk_predictor.py
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -20,7 +19,7 @@ class ClaimRiskPredictor:
         self.setup_components()
 
     def setup_components(self):
-        """Initialize components with enhanced retrieval setup"""
+        """Initialize components with document type-specific processing"""
         try:
             self.llm = ChatGoogleGenerativeAI(
                 google_api_key=self.google_api_key,
@@ -37,22 +36,39 @@ class ClaimRiskPredictor:
             )
             
             self.risk_prompt = ChatPromptTemplate.from_messages([
-                ("system", """You are an expert claims analyst. Analyze the provided document context 
-                to assess claim risk and validity. Consider:
-                1. Policy terms and conditions
-                2. Claim details and documentation
-                3. Historical claim patterns
-                4. Risk factors and red flags
+                ("system", """You are an expert claims analyst. Compare the submitted claim report 
+                against the relevant terms and conditions to assess risk and validity. 
+                 
+                IMPORTANT: Do not hallucinate. Do not make up factual information.
                 
+                Terms & Conditions Context:
+                {terms_and_conditions}
+                
+                Claim Report Context:
+                {claim_report}
+                
+                Analyze the following aspects:
+                1. Compliance with policy terms
+                2. Completeness of claim documentation
+                3. Consistency between report and policy coverage
+                4. Specific risk indicators
+                 
+                Only output valid json and nothing else
                 Provide your analysis in the following JSON format:
                 {{
                     "risk_score": <float between 0-1>,
-                    "risk_factors": [<list of identified risk factors>],
-                    "validity_assessment": "<detailed assessment>",
-                    "recommended_actions": [<list of recommended actions>],
+                    "policy_violations": ["<list of specific terms & conditions violations>"],
+                    "documentation_gaps": ["<list of missing or incomplete documentation>"],
+                    "risk_indicators": ["<list of specific risk flags identified>"],
+                    "validity_assessment": {{
+                        "is_valid": true or false,
+                        "reasoning": "<detailed explanation>",
+                        "policy_references": ["<specific sections from T&C that support the assessment>"]
+                    }},
+                    "recommended_actions": ["<list of specific next steps>"],
                     "confidence_score": <float between 0-1>
                 }}"""),
-                ("human", "Context: {context}\n\nQuestion: {question}")
+                ("human", "\nQuestion: {question}")
             ])
             
             self.document_processor = DocumentProcessor()
@@ -62,43 +78,78 @@ class ClaimRiskPredictor:
             logger.error(f"Error setting up components: {str(e)}")
             raise
 
-    def process_claim(self, file_paths: List[str], query: str) -> Dict[str, Any]:
-        """Process claims with enhanced retrieval and ranking"""
+    def separate_documents(self, documents: List[Any]) -> Dict[str, List[Any]]:
+        """Separate documents into terms & conditions and claim reports"""
+        separated_docs = {
+            "terms_and_conditions": [],
+            "claim_reports": []
+        }
+        
+        for doc in documents:
+            doc_type = doc.metadata.get('doc_type', '').lower()
+            if 'terms' in doc_type or 'conditions' in doc_type or 't&c' in doc_type:
+                separated_docs["terms_and_conditions"].append(doc)
+            elif 'claim' in doc_type or 'report' in doc_type:
+                separated_docs["claim_reports"].append(doc)
+                
+        return separated_docs
+
+    def format_documents(self, docs: List[Any]) -> str:
+        """Format documents with metadata and content"""
+        return "\n\n".join([
+            f"Section: {doc.metadata.get('section', 'Unknown')}\n"
+            f"Content: {doc.page_content}"
+            for doc in docs
+        ])
+
+    def count_documents(self, file_paths: List[str]) -> int:
+        """Count the number of document files"""
+        if isinstance(file_paths, str):
+            return 1
+        return len(file_paths) if file_paths else 0
+
+    def process_claim(self, terms_file: str, claim_file: str, query: str) -> Dict[str, Any]:
+        """Process claims by comparing terms & conditions against claim reports"""
         try:
-            documents = self.document_processor.process_documents(file_paths)
+            # Get initial document counts
+            total_files = self.count_documents([terms_file]) + self.count_documents([claim_file])
+            
+            # Process all documents
+            documents = self.document_processor.process_documents(terms_file=terms_file, claim_file=claim_file)
             
             if not documents:
                 return {
                     "error": "No documents were successfully processed",
-                    "metadata": {
-                        "processed_files": len(file_paths),
-                        "successful_files": 0
-                    }
+                    "metadata": {"processed_files": total_files, "successful_files": 0}
                 }
             
-            ensemble_retriever = self.retrieval_system.setup_retrievers(documents)
-            retrieved_docs = ensemble_retriever.get_relevant_documents(query)
+            # Separate documents by type
+            separated_docs = {
+                "terms_and_conditions": documents[0],
+                "claim_reports": documents[1]
+            }
             
-            if not retrieved_docs:
+            if not separated_docs["terms_and_conditions"] or not separated_docs["claim_reports"]:
                 return {
-                    "error": "No relevant documents found",
+                    "error": "Missing required document types. Need both terms & conditions and claim reports.",
                     "metadata": {
-                        "processed_files": len(file_paths),
-                        "successful_files": len(documents)
+                        "found_terms": bool(separated_docs["terms_and_conditions"]),
+                        "found_claims": bool(separated_docs["claim_reports"])
                     }
                 }
             
-            def format_docs(docs):
-                return "\n\n".join([
-                    f"Source: {doc.metadata.get('file_name', 'Unknown')}\n"
-                    f"Type: {doc.metadata.get('doc_type', 'Unknown')}\n"
-                    f"Content: {doc.page_content}"
-                    for doc in docs
-                ])
-
+            # Set up retrieval for both document types
+            tc_retriever = self.retrieval_system.setup_retrievers(separated_docs["terms_and_conditions"])
+            claim_retriever = self.retrieval_system.setup_retrievers(separated_docs["claim_reports"])
+            
+            # Get relevant sections from both document types
+            relevant_tc = tc_retriever.get_relevant_documents(query)
+            relevant_claims = claim_retriever.get_relevant_documents(query)
+            
             rag_chain = (
                 {
-                    "context": lambda x: format_docs(retrieved_docs),
+                    "terms_and_conditions": lambda x: self.format_documents(relevant_tc),
+                    "claim_report": lambda x: self.format_documents(relevant_claims),
                     "question": RunnablePassthrough()
                 }
                 | self.risk_prompt
@@ -108,18 +159,28 @@ class ClaimRiskPredictor:
             
             response = rag_chain.invoke(query)
             
+            # Count sections safely
+            tc_sections = 1 if separated_docs["terms_and_conditions"] else 0
+            claim_sections = 1 if separated_docs["claim_reports"] else 0
+            
             return {
                 "analysis": response,
                 "metadata": {
-                    "processed_files": len(file_paths),
-                    "successful_files": len(documents),
-                    "retrieved_docs": len(retrieved_docs),
-                    "top_documents": [
+                    "processed_files": total_files,
+                    "terms_and_conditions": {
+                        "total_sections": tc_sections,
+                        "relevant_sections": len(relevant_tc) if relevant_tc else 0
+                    },
+                    "claim_reports": {
+                        "total_documents": claim_sections,
+                        "relevant_sections": len(relevant_claims) if relevant_claims else 0
+                    },
+                    "top_referenced_sections": [
                         {
                             "file_name": doc.metadata.get('file_name', 'Unknown'),
-                            "doc_type": doc.metadata.get('doc_type', 'Unknown')
+                            "section": doc.metadata.get('section', 'Unknown')
                         }
-                        for doc in retrieved_docs[:3]
+                        for doc in (relevant_tc + relevant_claims)[:5]
                     ]
                 }
             }
@@ -129,7 +190,6 @@ class ClaimRiskPredictor:
             return {
                 "error": str(e),
                 "metadata": {
-                    "processed_files": len(file_paths),
-                    "successful_files": len(documents) if 'documents' in locals() else 0
+                    "processed_files": total_files if 'total_files' in locals() else 0
                 }
             }

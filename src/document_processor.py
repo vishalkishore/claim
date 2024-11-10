@@ -1,31 +1,47 @@
 from langchain.document_loaders import PyMuPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple, Any
 import pandas as pd
 import os
 import re
 from utils.text_preprocessing import clean_text, detect_document_type
 from utils.logging import setup_logging
+from dataclasses import dataclass
+from datetime import datetime
 
 logger = setup_logging()
 
+class DocumentType:
+    TERMS = "terms_and_conditions"
+    CLAIM = "claim_report"
+
+@dataclass
+class ProcessedDocument:
+    content: str
+    doc_type: str
+    metadata: Dict
+    sections: List[str]
+
 class DocumentProcessor:
     def __init__(self):
-        self.section_headers = [
-            # Common headers in T&C and insurance documents
-            r"(?i)^article\s+\d+",
-            r"(?i)^section\s+\d+",
-            r"(?i)^\d+\.\s+[A-Z]",
-            r"(?i)^[A-Z][A-Z\s]+\:",
-            r"(?i)^CHAPTER\s+\d+",
-            # Insurance specific patterns
-            r"(?i)^COVERAGE\s+[A-Z]",
-            r"(?i)^EXCLUSIONS?",
-            r"(?i)^DEFINITIONS?",
-            r"(?i)^CONDITIONS?"
+        # Fixed regex patterns with proper anchoring and flags
+        self.section_patterns = [
+            # Basic numbered sections
+            r"^\s*(?:Section|SECTION)\s+\d+(?:\.\d+)*",
+            r"^\s*\d+(?:\.\d+)*\s+[A-Z]",
+            # Headers in ALL CAPS
+            r"^\s*[A-Z][A-Z\s]{2,}(?:\s*\(.*\))?:?$",
+            # Insurance specific sections
+            r"^\s*(?:COVERAGE|EXCLUSIONS?|CONDITIONS?|DEFINITIONS?)\s*:?$",
+            # Articles and chapters
+            r"^\s*(?:Article|ARTICLE|Chapter|CHAPTER)\s+\d+(?:\.\d+)*",
+            # Common document sections
+            r"^\s*(?:PURPOSE|SCOPE|INTRODUCTION|BACKGROUND|SUMMARY|CONCLUSION)s*:?$",
+            # Appendices and exhibits
+            r"^\s*(?:Appendix|APPENDIX|Exhibit|EXHIBIT)\s+[A-Z\d]+"
         ]
-        self.header_pattern = "|".join(self.section_headers)
+        self.header_pattern = "|".join(self.section_patterns)
 
     def detect_structure_type(self, text: str) -> str:
         """Detect the type of document structure"""
@@ -37,7 +53,6 @@ class DocumentProcessor:
     def create_text_splitter(self, structure_type: str) -> RecursiveCharacterTextSplitter:
         """Create appropriate text splitter based on document structure"""
         if structure_type == "structured":
-            # For structured documents, split on section headers and preserve them
             return RecursiveCharacterTextSplitter(
                 separators=["\n\n", "\n", " "],
                 chunk_size=1000,
@@ -48,7 +63,6 @@ class DocumentProcessor:
                 strip_whitespace=True
             )
         else:
-            # For standard documents, use more aggressive splitting
             return RecursiveCharacterTextSplitter(
                 chunk_size=500,
                 chunk_overlap=50,
@@ -75,90 +89,71 @@ class DocumentProcessor:
             
         return sections
 
-    def process_documents(self, file_paths: List[str]) -> List[Document]:
-        """Process documents with enhanced preprocessing and intelligent splitting"""
-        processed_docs = []
+    def process_single_document(self, file_path: str) -> List[Document]:
+        """Process a single document and return list of processed chunks"""
+        if not os.path.exists(file_path):
+            logger.warning(f"File not found: {file_path}")
+            return []
         
-        for file_path in file_paths:
-            try:
-                if not os.path.exists(file_path):
-                    logger.warning(f"File not found: {file_path}")
+        try:
+            loader = PyMuPDFLoader(file_path)
+            docs = loader.load()
+            
+            if not docs:
+                logger.warning(f"No content extracted from: {file_path}")
+                return []
+            
+            processed_docs = []
+            metadata = {
+                "file_name": os.path.basename(file_path),
+                "doc_type": detect_document_type(docs[0].page_content),
+                "timestamp": pd.Timestamp.now().isoformat(),
+                "preprocessed": True
+            }
+            
+            for doc in docs:
+                cleaned_content = clean_text(doc.page_content)
+                if not cleaned_content:
                     continue
                 
-                loader = PyMuPDFLoader(file_path)
-                docs = loader.load()
+                structure_type = self.detect_structure_type(cleaned_content)
+                text_splitter = self.create_text_splitter(structure_type)
                 
-                if not docs:
-                    logger.warning(f"No content extracted from: {file_path}")
-                    continue
-                
-                # Basic metadata
-                metadata = {
-                    "file_name": os.path.basename(file_path),
-                    "doc_type": detect_document_type(docs[0].page_content),
-                    "timestamp": pd.Timestamp.now().isoformat(),
-                    "preprocessed": True
-                }
-                
-                for doc in docs:
-                    # Clean and preprocess text
-                    cleaned_content = clean_text(doc.page_content)
-                    if not cleaned_content:
-                        continue
-                    
-                    # Detect document structure
-                    structure_type = self.detect_structure_type(cleaned_content)
-                    
-                    # Create appropriate splitter
-                    text_splitter = self.create_text_splitter(structure_type)
-                    
-                    if structure_type == "structured":
-                        # For structured documents, first split by sections
-                        sections = self.split_by_sections(cleaned_content)
-                        
-                        # Then apply the text splitter to each section
-                        for section in sections:
-                            splits = text_splitter.split_text(section)
-                            
-                            for split in splits:
-                                # Create new document for each split
-                                split_metadata = metadata.copy()
-                                split_metadata.update({
-                                    "structure_type": structure_type,
-                                    "word_count": len(split.split()),
-                                    "char_count": len(split),
-                                    "section_header": re.match(self.header_pattern, split.strip(), re.MULTILINE)
-                                })
-                                
-                                processed_docs.append(Document(
-                                    page_content=split,
-                                    metadata=split_metadata
-                                ))
-                    else:
-                        # For standard documents, just use the text splitter
-                        splits = text_splitter.split_text(cleaned_content)
-                        
+                if structure_type == "structured":
+                    sections = self.split_by_sections(cleaned_content)
+                    for section in sections:
+                        splits = text_splitter.split_text(section)
                         for split in splits:
                             split_metadata = metadata.copy()
                             split_metadata.update({
                                 "structure_type": structure_type,
                                 "word_count": len(split.split()),
-                                "char_count": len(split)
+                                "char_count": len(split),
+                                "section_header": re.match(self.header_pattern, split.strip(), re.MULTILINE)
                             })
-                            
                             processed_docs.append(Document(
                                 page_content=split,
                                 metadata=split_metadata
                             ))
-                            
-            except Exception as e:
-                logger.error(f"Error processing {file_path}: {str(e)}")
-                continue
-                
-        if not processed_docs:
-            logger.warning("No documents were successfully processed")
+                else:
+                    splits = text_splitter.split_text(cleaned_content)
+                    for split in splits:
+                        split_metadata = metadata.copy()
+                        split_metadata.update({
+                            "structure_type": structure_type,
+                            "word_count": len(split.split()),
+                            "char_count": len(split)
+                        })
+                        processed_docs.append(Document(
+                            page_content=split,
+                            metadata=split_metadata
+                        ))
+                        
+            return processed_docs
             
-        return processed_docs
+        except Exception as e:
+            logger.error(f"Error processing {file_path}: {str(e)}")
+            return []
 
     def get_section_titles(self, docs: List[Document]) -> List[str]:
         """Extract section titles from processed documents"""
@@ -168,3 +163,39 @@ class DocumentProcessor:
             if re.match(self.header_pattern, content, re.MULTILINE):
                 titles.append(content.split('\n')[0])
         return list(set(titles))
+
+    def process_documents(self, terms_file: str, claim_file: str) -> Tuple[ProcessedDocument, ProcessedDocument]:
+        """Process both terms and claims documents and return as ProcessedDocument objects"""
+        # Process terms and conditions
+        terms_docs = self.process_single_document(terms_file)
+        terms_content = "\n".join([doc.page_content for doc in terms_docs])
+        terms_sections = self.get_section_titles(terms_docs)
+        
+        terms = ProcessedDocument(
+            content=terms_content,
+            doc_type=DocumentType.TERMS,
+            metadata={
+                "file_name": os.path.basename(terms_file),
+                "processed_at": datetime.now().isoformat(),
+                "section_count": len(terms_sections)
+            },
+            sections=terms_sections
+        )
+        
+        # Process claim report
+        claim_docs = self.process_single_document(claim_file)
+        claim_content = "\n".join([doc.page_content for doc in claim_docs])
+        claim_sections = self.get_section_titles(claim_docs)
+        
+        claim = ProcessedDocument(
+            content=claim_content,
+            doc_type=DocumentType.CLAIM,
+            metadata={
+                "file_name": os.path.basename(claim_file),
+                "processed_at": datetime.now().isoformat(),
+                "section_count": len(claim_sections)
+            },
+            sections=claim_sections
+        )
+        
+        return terms, claim

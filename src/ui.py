@@ -1,10 +1,10 @@
 import gradio as gr
 import json
-from claim_risk_predictor import ClaimRiskPredictor  # Import the previous class
+from claim_risk_predictor import ClaimRiskPredictor
 import tempfile
 import os
 import logging
-from typing import List, Dict, Any, Union
+from typing import Dict, Any, Union
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,59 +15,49 @@ class ClaimRiskUI:
         self.temp_dir = tempfile.mkdtemp()
         logger.info(f"Initialized temporary directory at {self.temp_dir}")
 
-    def save_uploaded_files(self, files: List[tempfile.SpooledTemporaryFile]) -> List[str]:
-        """Save uploaded files and return their paths"""
-        saved_paths = []
-        for file in files:
-            if file is not None:
+    def save_uploaded_file(self, file: Union[tempfile.SpooledTemporaryFile, str]) -> str:
+        """Save a single uploaded file and return its path"""
+        if file is None:
+            return None
+            
+        try:
+            if isinstance(file, tempfile.SpooledTemporaryFile):
                 temp_path = os.path.join(self.temp_dir, file.name)
-                with open(temp_path, 'wb') as f:
-                    f.write(file.read())
-                saved_paths.append(temp_path)
-        return saved_paths
-    
-    def save_uploaded_files(self, files: List[Union[tempfile.SpooledTemporaryFile, str]]) -> List[str]:
-        """Save uploaded files and return their paths"""
-        saved_paths = []
-        
-        for file in files:
-            if file is not None:
-                # Determine the file path and content to save
-                if isinstance(file, tempfile.SpooledTemporaryFile):
-                    temp_path = os.path.join(self.temp_dir, file.name)
-                    content = file.read()
-                elif isinstance(file, str):  # If file is a path as a string
-                    temp_path = os.path.join(self.temp_dir, os.path.basename(file))
-                    with open(file, 'rb') as f:
-                        content = f.read()
-                else:
-                    continue  # Skip if the file type is unexpected
-                
-                # Write content to temp_path
-                with open(temp_path, 'wb') as f:
-                    f.write(content)
-                saved_paths.append(temp_path)
-        
-        return saved_paths
+                content = file.read()
+            elif isinstance(file, str):
+                temp_path = os.path.join(self.temp_dir, os.path.basename(file))
+                with open(file, 'rb') as f:
+                    content = f.read()
+            else:
+                return None
 
-    def cleanup_files(self, file_paths: List[str]):
+            with open(temp_path, 'wb') as f:
+                f.write(content)
+            return temp_path
+            
+        except Exception as e:
+            logger.error(f"Error saving file: {str(e)}")
+            return None
+
+    def cleanup_files(self, *file_paths: str):
         """Clean up temporary files"""
         for path in file_paths:
-            try:
-                if os.path.exists(path):
+            if path and os.path.exists(path):
+                try:
                     os.remove(path)
                     logger.info(f"Cleaned up file: {path}")
-            except Exception as e:
-                logger.error(f"Error cleaning up file {path}: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Error cleaning up file {path}: {str(e)}")
 
     def process_documents(self, 
-                        files: List[tempfile.SpooledTemporaryFile], 
+                        terms_file: tempfile.SpooledTemporaryFile,
+                        claim_file: tempfile.SpooledTemporaryFile, 
                         query: str) -> Dict[str, Any]:
-        """Process uploaded documents and return analysis results"""
+        """Process the terms and claim documents and return analysis results"""
         try:
-            if not files:
+            if not terms_file or not claim_file:
                 return {
-                    "error": "No files uploaded. Please upload at least one document.",
+                    "error": "Please upload both terms and claim documents.",
                     "metadata": {}
                 }
             
@@ -78,14 +68,27 @@ class ClaimRiskUI:
                 }
 
             # Save uploaded files
-            file_paths = self.save_uploaded_files(files)
-            logger.info(f"Saved {len(file_paths)} files for processing")
+            terms_path = self.save_uploaded_file(terms_file)
+            claim_path = self.save_uploaded_file(claim_file)
+
+            if not terms_path or not claim_path:
+                return {
+                    "error": "Error saving uploaded files.",
+                    "metadata": {}
+                }
+
+            logger.info(f"Processing terms file: {terms_path}")
+            logger.info(f"Processing claim file: {claim_path}")
 
             # Process the claim
-            result = self.predictor.process_claim(file_paths, query)
+            result = self.predictor.process_claim(
+                terms_file=terms_path,
+                claim_file=claim_path,
+                query=query
+            )
 
             # Cleanup temporary files
-            self.cleanup_files(file_paths)
+            self.cleanup_files(terms_path, claim_path)
 
             return result
 
@@ -107,29 +110,57 @@ class ClaimRiskUI:
         if "analysis" in result:
             analysis = result["analysis"]
             output.append("📊 Risk Analysis:")
-            output.append(f"• Risk Score: {analysis.get('risk_score', 'N/A'):.2f}")
-            output.append(f"• Confidence Score: {analysis.get('confidence_score', 'N/A'):.2f}")
+            
+            # Convert all values to strings before adding to output
+            risk_score = analysis.get('risk_score')
+            if isinstance(risk_score, (int, float)):
+                output.append(f"• Risk Score: {risk_score:.2f}")
+            else:
+                output.append(f"• Risk Score: N/A")
+                
+            confidence_score = analysis.get('confidence_score')
+            if isinstance(confidence_score, (int, float)):
+                output.append(f"• Confidence Score: {confidence_score:.2f}")
+            else:
+                output.append(f"• Confidence Score: N/A")
+
+            # Handle risk factors
             output.append("\n🚩 Risk Factors:")
-            for factor in analysis.get("risk_factors", []):
-                output.append(f"• {factor}")
+            risk_factors = analysis.get("risk_factors", [])
+            if isinstance(risk_factors, list):
+                for factor in risk_factors:
+                    output.append(f"• {str(factor)}")
+            else:
+                output.append("• No risk factors identified")
+
+            # Handle validity assessment
             output.append("\n📋 Validity Assessment:")
-            output.append(analysis.get("validity_assessment", "N/A"))
+            validity = analysis.get("validity_assessment")
+            output.append(str(validity) if validity else "N/A")
+
+            # Handle recommended actions
             output.append("\n📝 Recommended Actions:")
-            for action in analysis.get("recommended_actions", []):
-                output.append(f"• {action}")
+            actions = analysis.get("recommended_actions", [])
+            if isinstance(actions, list):
+                for action in actions:
+                    output.append(f"• {str(action)}")
+            else:
+                output.append("• No recommended actions")
 
         # Add metadata
         if "metadata" in result:
             metadata = result["metadata"]
             output.append("\n📌 Processing Details:")
-            output.append(f"• Processed Files: {metadata.get('processed_files', 0)}")
-            output.append(f"• Successfully Processed: {metadata.get('successful_files', 0)}")
-            output.append(f"• Retrieved Documents: {metadata.get('retrieved_docs', 0)}")
+            output.append(f"• Terms Document: {str(metadata.get('terms_file', 'Not provided'))}")
+            output.append(f"• Claim Document: {str(metadata.get('claim_file', 'Not provided'))}")
             
-            if "top_documents" in metadata:
-                output.append("\n📚 Top Referenced Documents:")
-                for doc in metadata["top_documents"]:
-                    output.append(f"• {doc.get('file_name', 'Unknown')} ({doc.get('doc_type', 'Unknown')})")
+            coverage_match = metadata.get('coverage_match')
+            if isinstance(coverage_match, (int, float)):
+                output.append(f"• Coverage Match: {coverage_match:.1f}%")
+            
+            policy_compliance = metadata.get('policy_compliance')
+            if isinstance(policy_compliance, (int, float)):
+                output.append(f"• Policy Compliance: {policy_compliance:.1f}%")
 
         return "\n".join(output)
 
@@ -139,16 +170,20 @@ class ClaimRiskUI:
                       theme=gr.themes.Soft()) as interface:
             gr.Markdown("""
             # 📄 Insurance Claim Risk Analyzer
-            Upload claim-related documents and get an AI-powered risk analysis report.
+            Upload policy terms and claim documents for AI-powered risk analysis.
             """)
 
             with gr.Row():
                 with gr.Column(scale=2):
-                    file_input = gr.File(
-                        file_count="multiple",
-                        label="Upload Documents",
+                    terms_file = gr.File(
+                        label="Upload Policy Terms Document",
                         file_types=[".pdf"],
-                        scale=2
+                        scale=1
+                    )
+                    claim_file = gr.File(
+                        label="Upload Claim Document",
+                        file_types=[".pdf"],
+                        scale=1
                     )
                     query_input = gr.Textbox(
                         label="Analysis Query",
@@ -165,26 +200,20 @@ class ClaimRiskUI:
                         lines=20
                     )
 
-            # gr.Examples(
-            #     examples=[
-            #         [["sample_claim.pdf"], "Analyze this claim for potential fraud indicators"],
-            #         [["policy.pdf", "claim_form.pdf"], "Evaluate coverage compliance and claim validity"],
-            #     ],
-            #     inputs=[file_input, query_input],
-            #     label="Example Queries"
-            # )
-
             analyze_button.click(
-                fn=lambda files, query: self.format_output(self.process_documents(files, query)),
-                inputs=[file_input, query_input],
+                fn=lambda terms, claim, query: self.format_output(
+                    self.process_documents(terms, claim, query)
+                ),
+                inputs=[terms_file, claim_file, query_input],
                 outputs=output_text
             )
 
             gr.Markdown("""
             ### 📝 Instructions
-            1. Upload one or more PDF documents related to the insurance claim
-            2. Enter your analysis query or use the default query
-            3. Click 'Analyze Documents' to get the risk assessment report
+            1. Upload the policy terms document (PDF)
+            2. Upload the claim document (PDF)
+            3. Enter your analysis query or use the default query
+            4. Click 'Analyze Documents' to get the risk assessment report
             
             ### 📊 Output Explanation
             - Risk Score: 0 (Low Risk) to 1 (High Risk)
