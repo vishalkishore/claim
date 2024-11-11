@@ -36,11 +36,44 @@ class ClaimRiskPredictor:
             )
             
             self.risk_prompt = ChatPromptTemplate.from_messages([
-                ("system", """You are an expert claims analyst. Compare the submitted claim report 
-                against the relevant terms and conditions to assess risk and validity. 
-                 
-                IMPORTANT: Do not hallucinate. Do not make up factual information.
+                ("system", """You are an expert claims analyst. Compare the submitted claim report and estimated bill of repairs
+                against the relevant terms and conditions to assess risk and validity.
                 
+                Important Note: The submitted documents are standardized compilations of the originals. Treat them as accurate and authentic representations of the full original records.
+
+                # Calculate a risk score based on these weights and factors:
+
+                Risk Score = (0.3)*(Policy Compliance) + (0.3)*(Documentation Quality) + (0.4)*(Fraud Risk Indicators)
+
+                Where:
+                1. Policy Compliance (0-1):
+                - Full compliance = 0
+                - Minor violations = 0.3-0.5
+                - Major violations = 0.6-1.0
+
+                2. Documentation Quality (0-1):
+                - Complete documentation = 0
+                - Minor gaps = 0.3-0.5
+                - Major gaps = 0.6-1.0
+
+                3. Fraud Risk Indicators (0-1):
+                - Calculated based on presence of:
+                    * Timing inconsistencies (+0.2)
+                    * Unusual claim amounts (+0.2)
+                    * Missing third-party verification (+0.2)
+                    * Document alterations (+0.2)
+                    * Prior suspicious claims (+0.2)
+
+                Final Score Interpretation:
+                - 0.0-0.3: Low Risk
+                - 0.3-0.6: Medium Risk
+                - 0.6-0.8: High Risk
+                - 0.8-1.0: Critical Risk
+                 
+                IMPORTANT: 
+                - Do not hallucinate. Do not make up factual information.
+                - Return only valid JSON as output, in the format provided below. Avoid any extra text or explanation outside the JSON.
+            
                 Terms & Conditions Context:
                 {terms_and_conditions}
                 
@@ -53,7 +86,6 @@ class ClaimRiskPredictor:
                 3. Consistency between report and policy coverage
                 4. Specific risk indicators
                  
-                Only output valid json and nothing else
                 Provide your analysis in the following JSON format:
                 {{
                     "risk_score": <float between 0-1>,
@@ -61,7 +93,6 @@ class ClaimRiskPredictor:
                     "documentation_gaps": ["<list of missing or incomplete documentation>"],
                     "risk_indicators": ["<list of specific risk flags identified>"],
                     "validity_assessment": {{
-                        "is_valid": true or false,
                         "reasoning": "<detailed explanation>",
                         "policy_references": ["<specific sections from T&C that support the assessment>"]
                     }},

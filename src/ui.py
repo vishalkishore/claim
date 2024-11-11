@@ -150,9 +150,6 @@ class ClaimRiskUI:
         # Add metadata
         if "metadata" in result:
             metadata = result["metadata"]
-            output.append("\n📌 Processing Details:")
-            output.append(f"• Terms Document: {str(metadata.get('terms_file', 'Not provided'))}")
-            output.append(f"• Claim Document: {str(metadata.get('claim_file', 'Not provided'))}")
             
             coverage_match = metadata.get('coverage_match')
             if isinstance(coverage_match, (int, float)):
@@ -188,7 +185,7 @@ class ClaimRiskUI:
                     query_input = gr.Textbox(
                         label="Analysis Query",
                         placeholder="Enter your analysis query here...",
-                        value="Analyze the claim risk considering policy terms and claim history"
+                        value="Analyze the claim risk considering policy terms and claim report containing the estimated bill of repairs"
                     )
                     analyze_button = gr.Button("🔍 Analyze Documents", variant="primary")
 
